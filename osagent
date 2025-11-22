@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API="http://127.0.0.1:8001"
+CMD=${1:-}
+ROLE=${2:-operator}
+USER_NAME=${USER:-me}
+
+if [[ -z "$CMD" ]]; then
+  echo "GenAI Linux Agent (minimal CLI)"
+  echo 'Usage: osagent "<english instruction>" [role]'
+  exit 1
+fi
+
+# Build plan payload and ask backend
+PLAN_PAYLOAD=$(jq -n --arg user "$USER_NAME" --arg role "$ROLE" --arg message "$CMD" '{user:$user, role:$role, message:$message}')
+PLAN_JSON=$(curl -s -X POST "$API/plan" -H "Content-Type: application/json" -d "$PLAN_PAYLOAD")
+
+REQ_APPROVAL=$(jq -r '.requires_approval' <<<"$PLAN_JSON" 2>/dev/null || echo "true")
+EXPL=$(jq -r '.explanation // ""' <<<"$PLAN_JSON" 2>/dev/null || echo "")
+
+echo "Instruction: $CMD"
+[[ -n "$EXPL" ]] && echo "Reason: $EXPL"
+echo
+
+COUNT=$(jq '.plan | length' <<<"$PLAN_JSON" 2>/dev/null || echo 0)
+if [[ "$COUNT" -eq 0 ]]; then
+  echo "No steps planned."
+else
+  echo "Steps to execute:"
+  for i in $(seq 0 $((COUNT-1))); do
+    CMDLINE=$(jq -r ".plan[$i].args.cmd // \"\"" <<<"$PLAN_JSON")
+    echo "  [$((i+1))] $CMDLINE"
+  done
+fi
+echo
+
+# If approval is required, ask the user, otherwise auto-apply
+if [[ "$REQ_APPROVAL" == "true" ]]; then
+  read -p "Apply? (y/N): " yn
+  if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+    echo "Plan saved for later execution."
+    exit 0
+  fi
+fi
+
+APPLY_PAYLOAD=$(jq -n --arg user "$USER_NAME" '{user:$user}')
+APPLY_JSON=$(curl -s -X POST "$API/apply_pending" -H "Content-Type: application/json" -d "$APPLY_PAYLOAD")
+
+LEN=$(jq '.applied | length' <<<"$APPLY_JSON" 2>/dev/null || echo 0)
+for i in $(seq 0 $((LEN-1))); do
+  STEP_CMD=$(jq -r ".applied[$i].step.args.cmd // \"\"" <<<"$APPLY_JSON")
+  RC=$(jq -r ".applied[$i].result.returncode // -1" <<<"$APPLY_JSON")
+  STDOUT=$(jq -r ".applied[$i].result.stdout // \"\"" <<<"$APPLY_JSON")
+  STDERR=$(jq -r ".applied[$i].result.stderr // \"\"" <<<"$APPLY_JSON")
+
+  echo "[$((i+1))] Command: $STEP_CMD"
+  echo "Exit: $RC"
+  if [[ -n "$STDOUT" ]]; then
+    echo "Output:"
+    echo "$STDOUT"
+  fi
+  if [[ -n "$STDERR" ]]; then
+    echo "Errors:"
+    echo "$STDERR"
+  fi
+  echo
+done
