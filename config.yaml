@@ -8,4 +8,3 @@ agent:
   port: 8001
   auto_apply: false
 
-audit_log: "./logs/audit.jsonl"
